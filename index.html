@@ -1,0 +1,1172 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+  <title>Bug Smash</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Caveat:wght@500;700&family=Patrick+Hand&family=Shadows+Into+Light&display=swap" rel="stylesheet">
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    html, body {
+      width: 100%; height: 100%; overflow: hidden;
+      background: #1c1814;
+      font-family: 'Patrick Hand', cursive;
+      color: #1F2A4A;
+      user-select: none;
+    }
+    #game { display: block; width: 100vw; height: 100vh; cursor: crosshair; }
+
+    #hud-title {
+      position: fixed; top: 18px; left: 50%;
+      transform: translateX(-50%) rotate(-1.5deg);
+      pointer-events: none; text-align: center; z-index: 10;
+    }
+    #hud-title h1 {
+      font-family: 'Caveat', cursive; font-weight: 700; font-size: 50px;
+      line-height: 1; color: #1F2A4A; letter-spacing: 2px;
+      text-shadow: 1px 1px 0 rgba(0,0,0,0.04), 0 0 24px rgba(245,220,160,0.4);
+    }
+    #hud-title .subtitle {
+      font-family: 'Shadows Into Light', cursive; font-size: 16px;
+      color: #6a5a3a; margin-top: -4px; letter-spacing: 1px;
+    }
+
+    #hud-hint {
+      position: fixed; bottom: 14px; left: 50%;
+      transform: translateX(-50%);
+      pointer-events: none; text-align: center; z-index: 10;
+      display: flex; gap: 30px;
+    }
+    #hud-hint .group {
+      font-family: 'Patrick Hand', cursive; font-size: 14px; color: #4a3a20;
+      line-height: 1.4;
+    }
+    #hud-hint .group strong { font-family: 'Caveat', cursive; font-size: 20px; }
+    #hud-hint .p1 strong { color: #1F4A8A; }
+    #hud-hint .p2 strong { color: #B5413B; }
+
+    .key {
+      display: inline-flex; align-items: center; justify-content: center;
+      min-width: 20px; height: 20px; padding: 0 4px;
+      font-family: 'Caveat', cursive; font-weight: 700; font-size: 13px;
+      color: #1F2A4A; background: rgba(248, 242, 224, 0.6);
+      border: 1.5px solid #1F2A4A; border-radius: 4px;
+      box-shadow: 1px 2px 0 rgba(30, 20, 10, 0.18);
+      transform: rotate(-2deg); margin: 0 1px;
+    }
+    .key:nth-child(2) { transform: rotate(1deg); }
+    .key:nth-child(3) { transform: rotate(-1deg); }
+  </style>
+</head>
+<body>
+  <canvas id="game"></canvas>
+
+  <div id="hud-title">
+    <h1>Bug Smash</h1>
+    <p class="subtitle">el que pierde se come el ticket</p>
+  </div>
+
+  <div id="hud-hint">
+    <div class="group p1">
+      <strong>P1 Backend</strong><br>
+      <span class="key">A</span><span class="key">D</span> mover · <span class="key">W</span> saltar · <span class="key">S</span> bajar<br>
+      <span class="key">F</span> golpe (mantener = smash) · <span class="key">G</span> especial · <span class="key">Q</span> escudo
+    </div>
+    <div class="group p2">
+      <strong>P2 Frontend</strong><br>
+      <span class="key">←</span><span class="key">→</span> mover · <span class="key">↑</span> saltar · <span class="key">↓</span> bajar<br>
+      <span class="key">,</span> golpe · <span class="key">.</span> especial · <span class="key">/</span> escudo
+    </div>
+  </div>
+
+<script>
+// ─── Constants & palette ───────────────────────────────────────────
+const TAU = Math.PI * 2;
+const PAPER = {
+  cream:'#F3EAD0', creamShadow:'#E6DAB5', creamHi:'#FAF3DC',
+  grid:'#9CB6CC', gridStrong:'#7A99B5',
+  margin:'#B5413B', hole:'#1c1814',
+  ink:'#1F2A4A', inkDeep:'#141B33',
+};
+const CREAM_FILL = '#FAF1D5';
+const P1_INK   = '#1F4A8A';
+const P1_FILL  = '#D9E4F5';
+const P2_INK   = '#B5413B';
+const P2_FILL  = '#F4D6DB';
+const BUG_INK  = '#1a3a14';
+const BUG_FILL = '#A8C062';
+
+// ─── Wobble primitives ─────────────────────────────────────────────
+function rand(s) { const x = Math.sin(s * 12.9898 + 4.7) * 43758.5453; return x - Math.floor(x); }
+
+function sampleLine(x1, y1, x2, y2, segs, wob, seed, ts, te) {
+  const dx = x2 - x1, dy = y2 - y1, len = Math.hypot(dx, dy) || 1;
+  const nx = -dy / len, ny = dx / len;
+  const pts = [];
+  for (let i = 0; i <= segs; i++) {
+    const t = i / segs;
+    let taper = 1;
+    if (ts) taper *= Math.min(1, t * 3);
+    if (te) taper *= Math.min(1, (1 - t) * 3);
+    const off = (rand(seed + i * 7.13) - 0.5) * 2 * wob * taper;
+    pts.push([x1 + dx * t + nx * off, y1 + dy * t + ny * off]);
+  }
+  return pts;
+}
+function strokeSmooth(ctx, pts, closed) {
+  if (pts.length < 2) return;
+  ctx.beginPath(); ctx.moveTo(pts[0][0], pts[0][1]);
+  for (let i = 1; i < pts.length - 1; i++) {
+    const [x, y] = pts[i], [nx, ny] = pts[i + 1];
+    ctx.quadraticCurveTo(x, y, (x + nx) / 2, (y + ny) / 2);
+  }
+  if (closed) {
+    const last = pts[pts.length - 1], first = pts[0];
+    ctx.quadraticCurveTo(last[0], last[1], (last[0] + first[0]) / 2, (last[1] + first[1]) / 2);
+    ctx.closePath();
+  } else { const last = pts[pts.length - 1]; ctx.lineTo(last[0], last[1]); }
+  ctx.stroke();
+}
+function fillSmooth(ctx, pts) {
+  if (pts.length < 3) return;
+  ctx.beginPath(); ctx.moveTo(pts[0][0], pts[0][1]);
+  for (let i = 1; i < pts.length - 1; i++) {
+    const [x, y] = pts[i], [nx, ny] = pts[i + 1];
+    ctx.quadraticCurveTo(x, y, (x + nx) / 2, (y + ny) / 2);
+  }
+  const last = pts[pts.length - 1]; ctx.lineTo(last[0], last[1]);
+  ctx.closePath(); ctx.fill();
+}
+function wobbleLine(ctx, x1, y1, x2, y2, o = {}) {
+  const w = o.wobble ?? 1.2, s = o.seed ?? 0, t = o.taper ?? true;
+  const len = Math.hypot(x2 - x1, y2 - y1);
+  const segs = o.segments ?? Math.max(6, Math.ceil(len / 14));
+  strokeSmooth(ctx, sampleLine(x1, y1, x2, y2, segs, w, s, t, t), false);
+}
+function wobbleShape(ctx, points, o = {}) {
+  const w = o.wobble ?? 1.4, s = o.seed ?? 0, segments = o.segments ?? 5;
+  const fill = o.fill ?? null, stroke = o.stroke ?? true;
+  const all = [], n = points.length;
+  for (let i = 0; i < n; i++) {
+    const [x1, y1] = points[i], [x2, y2] = points[(i + 1) % n];
+    const seg = sampleLine(x1, y1, x2, y2, segments, w, s + i * 31.7, false, false);
+    if (i > 0) seg.shift();
+    all.push(...seg);
+  }
+  if (fill) { ctx.save(); ctx.fillStyle = fill; fillSmooth(ctx, all); ctx.restore(); }
+  if (stroke) strokeSmooth(ctx, all, true);
+}
+function wobbleCircle(ctx, cx, cy, r, o = {}) {
+  const w = o.wobble ?? 1.2, s = o.seed ?? 0, fill = o.fill ?? null, stroke = o.stroke ?? true;
+  const segs = o.segments ?? Math.max(16, Math.ceil(r * 1.5));
+  const pts = [], start = (rand(s + 991) - 0.5) * 0.8;
+  for (let i = 0; i <= segs; i++) {
+    const t = i / segs, ang = start + t * TAU;
+    const wob = (rand(s + i * 13.3) - 0.5) * w * 2;
+    const rr = Math.max(0.2, r + wob);
+    pts.push([cx + Math.cos(ang) * rr, cy + Math.sin(ang) * rr]);
+  }
+  if (fill) { ctx.save(); ctx.fillStyle = fill; fillSmooth(ctx, pts); ctx.restore(); }
+  if (stroke) strokeSmooth(ctx, pts, true);
+}
+function wobblePath(ctx, points, o = {}) {
+  const w = o.wobble ?? 1.0, s = o.seed ?? 0, segments = o.segments ?? 6;
+  const n = points.length; if (n < 2) return;
+  const all = [];
+  for (let i = 0; i < n - 1; i++) {
+    const [x1, y1] = points[i], [x2, y2] = points[i + 1];
+    const seg = sampleLine(x1, y1, x2, y2, segments, w, s + i * 41.3, i === 0, i === n - 2);
+    if (i > 0) seg.shift();
+    all.push(...seg);
+  }
+  strokeSmooth(ctx, all, false);
+}
+
+// ─── Paper background (cached) ─────────────────────────────────────
+const CELL = 32;
+let paperCache = null, paperW = 0, paperH = 0, paperDpr = 0;
+function renderPaper(ctx, w, h, dpr) {
+  if (paperCache && paperW === w && paperH === h && paperDpr === dpr) {
+    ctx.drawImage(paperCache, 0, 0, w, h); return;
+  }
+  paperCache = document.createElement('canvas');
+  paperCache.width = Math.ceil(w * dpr);
+  paperCache.height = Math.ceil(h * dpr);
+  const c = paperCache.getContext('2d');
+  c.setTransform(dpr, 0, 0, dpr, 0, 0);
+  const grad = c.createLinearGradient(0, 0, 0, h);
+  grad.addColorStop(0, PAPER.creamHi); grad.addColorStop(0.5, PAPER.cream); grad.addColorStop(1, PAPER.creamShadow);
+  c.fillStyle = grad; c.fillRect(0, 0, w, h);
+  // grain
+  const count = Math.floor(w * h / 900);
+  for (let i = 0; i < count; i++) {
+    const x = rand(i * 1.31) * w, y = rand(i * 2.71) * h, v = rand(i * 0.91);
+    const a = 0.03 + v * 0.05;
+    c.fillStyle = v < 0.5 ? `rgba(120,90,40,${a})` : `rgba(255,250,230,${a})`;
+    c.fillRect(x, y, 1 + v * 1.2, 1 + v * 1.2);
+  }
+  c.save(); c.globalAlpha = 0.06; c.strokeStyle = '#8a6a3a'; c.lineWidth = 0.6;
+  const nFib = Math.floor(w / 18);
+  for (let i = 0; i < nFib; i++) {
+    const x = rand(i * 4.7) * w, y1 = rand(i * 6.1) * h, y2 = y1 + 30 + rand(i * 9.3) * 80;
+    c.beginPath(); c.moveTo(x, y1);
+    c.bezierCurveTo(x + 4, y1 + 20, x - 6, y2 - 20, x + 2, y2); c.stroke();
+  }
+  c.restore();
+  c.save(); c.strokeStyle = PAPER.grid; c.lineWidth = 1; c.globalAlpha = 0.32;
+  for (let x = 0; x <= w; x += CELL) { c.beginPath(); c.moveTo(x + 0.5, 0); c.lineTo(x + 0.5, h); c.stroke(); }
+  for (let y = 0; y <= h; y += CELL) { c.beginPath(); c.moveTo(0, y + 0.5); c.lineTo(w, y + 0.5); c.stroke(); }
+  c.restore();
+  c.save(); c.strokeStyle = PAPER.gridStrong; c.lineWidth = 1; c.globalAlpha = 0.45;
+  for (let x = 0; x <= w; x += CELL * 5) { c.beginPath(); c.moveTo(x + 0.5, 0); c.lineTo(x + 0.5, h); c.stroke(); }
+  for (let y = 0; y <= h; y += CELL * 5) { c.beginPath(); c.moveTo(0, y + 0.5); c.lineTo(w, y + 0.5); c.stroke(); }
+  c.restore();
+  const MARGIN_X = CELL * 3;
+  c.strokeStyle = PAPER.margin; c.lineWidth = 2.2; c.lineCap = 'round';
+  wobbleLine(c, MARGIN_X, -16, MARGIN_X, h + 16, { wobble: 0.9, seed: 7, segments: Math.ceil(h / 12), taper: false });
+  c.save(); c.globalAlpha = 0.25; c.lineWidth = 4;
+  wobbleLine(c, MARGIN_X, -16, MARGIN_X, h + 16, { wobble: 1.2, seed: 7, segments: Math.ceil(h / 12), taper: false });
+  c.restore();
+  for (let y = 64 * 0.6; y < h; y += 64) {
+    c.save(); c.fillStyle = 'rgba(50,30,10,0.16)';
+    c.beginPath(); c.ellipse(20, y + 3, 14, 12, 0, 0, TAU); c.fill(); c.restore();
+    c.fillStyle = PAPER.hole;
+    c.beginPath(); c.arc(18, y, 9, 0, TAU); c.fill();
+    const g = c.createRadialGradient(16, y - 3, 0, 18, y, 9);
+    g.addColorStop(0, 'rgba(80,60,40,0.6)'); g.addColorStop(0.6, 'rgba(20,12,8,0.95)'); g.addColorStop(1, '#000');
+    c.fillStyle = g; c.beginPath(); c.arc(18, y, 9, 0, TAU); c.fill();
+    c.strokeStyle = 'rgba(255,245,220,0.4)'; c.lineWidth = 0.8;
+    c.beginPath(); c.arc(18, y - 1, 7.5, Math.PI * 0.6, Math.PI * 0.95); c.stroke();
+  }
+  const sz = 38;
+  c.save();
+  c.fillStyle = 'rgba(60,40,20,0.12)';
+  c.beginPath(); c.moveTo(w - sz - 2, 0); c.lineTo(w, sz + 2); c.lineTo(w, 0); c.closePath(); c.fill();
+  c.fillStyle = PAPER.creamShadow;
+  c.beginPath(); c.moveTo(w - sz, 0); c.lineTo(w, sz); c.lineTo(w, 0); c.closePath(); c.fill();
+  c.strokeStyle = 'rgba(60,40,20,0.35)'; c.lineWidth = 1.2;
+  c.beginPath(); c.moveTo(w - sz, 0); c.lineTo(w, sz); c.stroke(); c.restore();
+  const stains = [
+    { x: 0.18, y: 0.74, r: 70, c: 'rgba(140,90,40,0.08)' },
+    { x: 0.82, y: 0.32, r: 90, c: 'rgba(120,80,30,0.06)' },
+    { x: 0.55, y: 0.88, r: 50, c: 'rgba(100,70,30,0.07)' },
+  ];
+  for (const s of stains) {
+    const cx = s.x * w, cy = s.y * h;
+    const g = c.createRadialGradient(cx, cy, 0, cx, cy, s.r);
+    g.addColorStop(0, s.c); g.addColorStop(1, s.c.replace(/[\d.]+\)/, '0)'));
+    c.fillStyle = g; c.beginPath(); c.arc(cx, cy, s.r, 0, TAU); c.fill();
+  }
+  const vg = c.createRadialGradient(w/2, h/2, Math.min(w,h)*0.35, w/2, h/2, Math.max(w,h)*0.85);
+  vg.addColorStop(0, 'rgba(0,0,0,0)'); vg.addColorStop(1, 'rgba(40,25,10,0.22)');
+  c.fillStyle = vg; c.fillRect(0, 0, w, h);
+  paperW = w; paperH = h; paperDpr = dpr;
+  ctx.drawImage(paperCache, 0, 0, w, h);
+}
+
+// ─── Canvas / DPI ──────────────────────────────────────────────────
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+let W = 0, H = 0, dpr = 1;
+function resize() {
+  dpr = Math.max(1, window.devicePixelRatio || 1);
+  W = window.innerWidth; H = window.innerHeight;
+  canvas.width = Math.ceil(W * dpr); canvas.height = Math.ceil(H * dpr);
+  canvas.style.width = W + 'px'; canvas.style.height = H + 'px';
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  paperCache = null; rebuildStage();
+}
+window.addEventListener('resize', resize);
+
+// ─── Stage ─────────────────────────────────────────────────────────
+let STAGE;
+function rebuildStage() {
+  const cx = W / 2, mainY = H * 0.72;
+  STAGE = {
+    main: { x: cx - 280, y: mainY, w: 560, h: 14 },
+    platforms: [
+      { x: cx - 230, y: mainY - 130, w: 150, h: 8 },
+      { x: cx + 80,  y: mainY - 130, w: 150, h: 8 },
+      { x: cx - 75,  y: mainY - 240, w: 150, h: 8 },
+    ],
+    bounds: { left: -180, right: W + 180, top: -240, bottom: H + 160 }
+  };
+}
+function drawPlatform(p, seed, label) {
+  ctx.save();
+  ctx.strokeStyle = 'rgba(31,42,74,0.18)'; ctx.lineWidth = 1.2;
+  for (let i = 0; i < 5; i++) {
+    const x0 = p.x + 4 + i * (p.w / 5);
+    wobbleLine(ctx, x0, p.y + p.h + 2, x0 + 10, p.y + p.h + 10, { wobble: 0.4, seed: seed + i * 3, segments: 3, taper: false });
+  }
+  ctx.restore();
+  ctx.strokeStyle = PAPER.ink; ctx.lineWidth = 3.2; ctx.lineCap = 'round';
+  wobbleLine(ctx, p.x, p.y, p.x + p.w, p.y, { wobble: 0.9, seed: seed + 71, segments: Math.ceil(p.w / 14), taper: true });
+  ctx.save(); ctx.globalAlpha = 0.35; ctx.lineWidth = 5;
+  wobbleLine(ctx, p.x, p.y, p.x + p.w, p.y, { wobble: 1.1, seed: seed + 71, segments: Math.ceil(p.w / 14), taper: true });
+  ctx.restore();
+  if (label) {
+    ctx.save(); ctx.fillStyle = 'rgba(31,42,74,0.4)';
+    ctx.font = '14px "Shadows Into Light"'; ctx.textAlign = 'center';
+    ctx.translate(p.x + p.w / 2, p.y + p.h + 22); ctx.rotate(-0.02);
+    ctx.fillText(label, 0, 0); ctx.restore();
+  }
+}
+
+// ─── Input ─────────────────────────────────────────────────────────
+const held = {};
+const pressed = {};
+const released = {};
+const blocked = new Set(['ArrowUp','ArrowDown','ArrowLeft','ArrowRight','Space','Comma','Period','Slash']);
+window.addEventListener('keydown', e => {
+  if (blocked.has(e.code)) e.preventDefault();
+  if (!held[e.code]) pressed[e.code] = true;
+  held[e.code] = true;
+});
+window.addEventListener('keyup', e => {
+  if (held[e.code]) released[e.code] = true;
+  held[e.code] = false;
+});
+
+const P1_CTRL = { left:'KeyA', right:'KeyD', up:'KeyW', down:'KeyS', attack:'KeyF', special:'KeyG', shield:'KeyQ' };
+const P2_CTRL = { left:'ArrowLeft', right:'ArrowRight', up:'ArrowUp', down:'ArrowDown', attack:'Comma', special:'Period', shield:'Slash' };
+
+function readInput(c) {
+  return {
+    left: held[c.left], right: held[c.right],
+    down: held[c.down], up: held[c.up],
+    downPressed: pressed[c.down],
+    jumpPressed: pressed[c.up],
+    attackPressed: pressed[c.attack],
+    attackHeld: held[c.attack],
+    attackReleased: released[c.attack],
+    specialPressed: pressed[c.special],
+    shieldHeld: held[c.shield],
+  };
+}
+
+// ─── Physics constants ─────────────────────────────────────────────
+const GRAVITY = 0.6, MAX_FALL = 14, FAST_FALL = 22;
+const JUMP_VEL = -13;
+const ACCEL_GND = 1.3, ACCEL_AIR = 0.55;
+const FRIC_GND = 0.78, FRIC_AIR = 0.97;
+
+// ─── Characters ────────────────────────────────────────────────────
+const CHARS = {
+  backend: {
+    name: 'Backend', ink: P1_INK, fill: P1_FILL, accessory: 'glasses',
+    weight: 1.3, speed: 0.88, jumpPower: 0.95,
+    attackPower: 1.25, attackRange: 64,
+    attackWindup: 6, attackDuration: 9, attackRecovery: 14,
+    upBPower: 14,
+  },
+  frontend: {
+    name: 'Frontend', ink: P2_INK, fill: P2_FILL, accessory: 'beret',
+    weight: 0.88, speed: 1.18, jumpPower: 1.1,
+    attackPower: 0.9, attackRange: 50,
+    attackWindup: 3, attackDuration: 7, attackRecovery: 9,
+    upBPower: 16,
+  }
+};
+
+// ─── Body shape (side view) ────────────────────────────────────────
+const BODY = [
+  [-12, -12], [-15, -22], [-14, -34], [ -6, -42],
+  [  6, -44], [ 14, -40], [ 16, -30], [ 15, -18],
+  [ 12, -10], [  6,  -8], [ -4,  -8], [-10, -10],
+];
+
+// ─── Fighter ───────────────────────────────────────────────────────
+// Position convention: this.x, this.y is the CENTER of the bounding box.
+class Fighter {
+  constructor(char, x, y, controls, label) {
+    this.c = char;
+    this.x = x; this.y = y;
+    this.vx = 0; this.vy = 0;
+    this.w = 32; this.h = 50;
+    this.facing = label === 1 ? 1 : -1;
+    this.onGround = false;
+    this.jumpsLeft = 2;
+    this.damage = 0;
+    this.stocks = 3;
+    this.controls = controls;
+    this.label = label;
+    this.attackTimer = 0;
+    this.attackCooldown = 0;
+    this.attackKind = 'jab';
+    this.chargedAmount = 0;
+    this.hitstun = 0;
+    this.hitstop = 0;
+    this.dropThrough = 0;
+    this.hitThisSwing = false;
+    this.spawnInvuln = 90;
+    this.walkT = 0;
+    this.blink = 0;
+    this.blinkT = 2 + Math.random() * 3;
+    this.particles = [];
+    // smash mechanics
+    this.charging = false;
+    this.chargeTime = 0;
+    this.maxCharge = 50;
+    this.shielding = false;
+    this.shieldHP = 100;
+    this.shieldBroken = 0;
+    this.specialCooldown = 0;
+    this.upBUsed = false;
+    this.lastHitBy = null;
+  }
+
+  get attacking() {
+    return this.attackTimer > 0 && this.attackTimer <= this.c.attackWindup + this.c.attackDuration;
+  }
+  get active() {
+    return this.attackTimer > this.c.attackWindup &&
+           this.attackTimer <= this.c.attackWindup + this.c.attackDuration;
+  }
+
+  update(input, dt) {
+    if (this.hitstop > 0) { this.hitstop--; return; }
+    if (this.spawnInvuln > 0) this.spawnInvuln--;
+
+    this.blinkT -= dt;
+    if (this.blink > 0) this.blink = Math.max(0, this.blink - dt * 7);
+    else if (this.blinkT <= 0) { this.blink = 1; this.blinkT = 2 + Math.random() * 3; }
+
+    if (this.specialCooldown > 0) this.specialCooldown--;
+    if (this.shieldBroken > 0) { this.shieldBroken--; this.hitstun = Math.max(this.hitstun, 2); }
+
+    // SHIELD: only on ground, not in hitstun, not attacking, not charging
+    const canShield = this.onGround && this.hitstun <= 0 && !this.attacking &&
+                      !this.charging && this.shieldBroken <= 0 && this.shieldHP > 5;
+    this.shielding = canShield && input.shieldHeld;
+    if (this.shielding) {
+      this.vx *= 0.6;
+      this.shieldHP = Math.max(0, this.shieldHP - 0.5);
+      if (this.shieldHP <= 0) {
+        this.shieldHP = 0; this.shieldBroken = 90;
+        this.vy = -8; this.shielding = false;
+        shake = Math.max(shake, 14);
+      }
+    } else {
+      this.shieldHP = Math.min(100, this.shieldHP + 0.18);
+    }
+
+    if (this.hitstun > 0) {
+      this.hitstun--;
+    } else if (this.shielding || this.shieldBroken > 0) {
+      // no actions while shielding / broken
+    } else {
+      const accel = this.onGround ? ACCEL_GND : ACCEL_AIR;
+      const maxSpd = 5 * this.c.speed;
+
+      // Charging halves movement
+      const moveDamp = this.charging ? 0.3 : 1;
+
+      if (input.left)  { this.vx -= accel * moveDamp; if (!this.charging) this.facing = -1; }
+      if (input.right) { this.vx += accel * moveDamp; if (!this.charging) this.facing = 1; }
+      if (!input.left && !input.right) {
+        this.vx *= this.onGround ? FRIC_GND : FRIC_AIR;
+        if (Math.abs(this.vx) < 0.1) this.vx = 0;
+      }
+      this.vx = Math.max(-maxSpd, Math.min(maxSpd, this.vx));
+
+      // Jump
+      if (input.jumpPressed && this.jumpsLeft > 0 && this.attackCooldown < 5 && !this.charging) {
+        this.vy = JUMP_VEL * this.c.jumpPower * (this.jumpsLeft === 2 ? 1 : 0.88);
+        this.jumpsLeft--; this.onGround = false;
+        this.spawnDust();
+      }
+
+      // Drop through
+      if (input.downPressed && this.onGround && !this.charging) this.dropThrough = 8;
+
+      // Fast fall
+      if (input.down && !this.onGround && this.vy > -2 && this.vy < FAST_FALL) {
+        this.vy = Math.min(FAST_FALL, this.vy + 4);
+      }
+
+      // SPECIAL: up-B in air (recovery), or grounded dash
+      if (input.specialPressed && this.specialCooldown <= 0 && !this.attacking && !this.charging) {
+        if (!this.onGround && !this.upBUsed) {
+          // up-B recovery
+          this.vy = -this.c.upBPower;
+          this.vx = this.vx * 0.4 + this.facing * 2;
+          this.upBUsed = true;
+          this.specialCooldown = 30;
+          this.spawnTrail();
+        } else if (this.onGround) {
+          // ground special: dash + immediate hit
+          this.vx = this.facing * 9;
+          this.attackTimer = 1;
+          this.attackKind = 'special';
+          this.chargedAmount = 0.4;
+          this.attackCooldown = 25;
+          this.hitThisSwing = false;
+          this.specialCooldown = 30;
+          this.spawnDust();
+        }
+      }
+
+      // CHARGE: hold attack while grounded
+      if (input.attackPressed && this.attackCooldown <= 0 && !this.charging) {
+        if (this.onGround) {
+          this.charging = true; this.chargeTime = 0;
+        } else {
+          // air attack — direct release
+          this.releaseAttack(0, 'air');
+        }
+      }
+      if (this.charging) {
+        if (input.attackHeld && this.chargeTime < this.maxCharge) {
+          this.chargeTime++;
+        }
+        if (!input.attackHeld || this.chargeTime >= this.maxCharge) {
+          const c = this.chargeTime / this.maxCharge;
+          this.charging = false;
+          this.releaseAttack(c, c > 0.25 ? 'smash' : 'jab');
+        }
+      }
+    }
+
+    // Gravity
+    this.vy += GRAVITY;
+    if (this.vy > MAX_FALL && !(input.down && !this.onGround)) this.vy = MAX_FALL;
+
+    this.x += this.vx;
+    this.y += this.vy;
+
+    // ── Platform collisions (CENTER-based) ──
+    const prevCenterY = this.y - this.vy;
+    const prevBottom = prevCenterY + this.h / 2;
+    this.onGround = false;
+    const tryLand = (p) => {
+      const left = this.x - this.w / 2;
+      const right = this.x + this.w / 2;
+      const bottom = this.y + this.h / 2;
+      if (right > p.x && left < p.x + p.w &&
+          bottom >= p.y && bottom <= p.y + p.h + 12 &&
+          this.vy >= 0 && prevBottom <= p.y + 1 &&
+          this.dropThrough <= 0) {
+        this.y = p.y - this.h / 2;
+        this.vy = 0;
+        if (!this.onGround) this.spawnDust();
+        this.onGround = true;
+        this.jumpsLeft = 2;
+        this.upBUsed = false;
+      }
+    };
+    tryLand(STAGE.main);
+    STAGE.platforms.forEach(tryLand);
+
+    if (this.dropThrough > 0) this.dropThrough--;
+    if (this.attackCooldown > 0) this.attackCooldown--;
+    if (this.attackTimer > 0) {
+      this.attackTimer++;
+      if (this.attackTimer > this.c.attackWindup + this.c.attackDuration + this.c.attackRecovery) {
+        this.attackTimer = 0;
+      }
+    }
+
+    // walk anim
+    if (this.onGround && Math.abs(this.vx) > 0.4) this.walkT += dt * 9;
+    else this.walkT *= 0.78;
+
+    // particles
+    this.particles = this.particles.filter(p => p.life-- > 0);
+    this.particles.forEach(p => { p.x += p.vx; p.y += p.vy; p.vy += 0.18; });
+  }
+
+  releaseAttack(charge, kind) {
+    this.attackTimer = 1;
+    this.chargedAmount = charge;
+    this.attackKind = kind;
+    const w = this.c.attackWindup + (kind === 'smash' ? 4 : 0);
+    this.attackCooldown = w + this.c.attackDuration + this.c.attackRecovery + (kind === 'smash' ? 6 : 0);
+    this.hitThisSwing = false;
+  }
+
+  spawnDust() {
+    for (let i = 0; i < 5; i++) {
+      this.particles.push({
+        x: this.x + (Math.random() - 0.5) * 16,
+        y: this.y + this.h/2,
+        vx: (Math.random() - 0.5) * 2.5, vy: -Math.random() * 1.6,
+        life: 18, color: 'rgba(31,42,74,0.45)', kind: 'dust'
+      });
+    }
+  }
+  spawnTrail() {
+    for (let i = 0; i < 10; i++) {
+      this.particles.push({
+        x: this.x + (Math.random() - 0.5) * 12,
+        y: this.y + 4 + i * 4,
+        vx: (Math.random() - 0.5) * 1.5, vy: Math.random() * 2,
+        life: 22, color: this.c.ink, kind: 'spark'
+      });
+    }
+  }
+  spawnHitSpark(x, y) {
+    for (let i = 0; i < 14; i++) {
+      this.particles.push({
+        x, y,
+        vx: (Math.random() - 0.5) * 9, vy: (Math.random() - 0.5) * 9,
+        life: 18,
+        color: ['#1F2A4A','#B5413B','#1F4A8A','#B58400'][Math.floor(Math.random()*4)],
+        kind: 'spark'
+      });
+    }
+  }
+
+  getHitbox() {
+    if (!this.active) return null;
+    const c = this.chargedAmount || 0;
+    const isSmash = this.attackKind === 'smash';
+    const isSpecial = this.attackKind === 'special';
+    const r = this.c.attackRange * (1 + c * 0.35) * (isSpecial ? 1.1 : 1);
+    return {
+      x: this.facing === 1 ? this.x + 4 : this.x - r - 4,
+      y: this.y - this.h/2 + 6,
+      w: r,
+      h: this.h - 12,
+      power: this.c.attackPower * (1 + c * 1.4) * (isSpecial ? 1.3 : 1),
+      facing: this.facing,
+      charge: c, kind: this.attackKind,
+      angle: isSmash ? 0.15 : 0.55,  // smash sends more horizontal
+    };
+  }
+
+  takeHit(hb, attacker) {
+    // Shielding blocks it
+    if (this.shielding && this.shieldHP > 0) {
+      this.shieldHP = Math.max(0, this.shieldHP - 14 * hb.power);
+      this.vx = hb.facing * 2;
+      this.hitstop = 8;
+      if (attacker) attacker.hitstop = 8;
+      this.spawnHitSpark(this.x, this.y - this.h/2 + 10);
+      if (this.shieldHP <= 0) { this.shieldBroken = 90; this.vy = -8; }
+      return;
+    }
+
+    const baseKB = 4;
+    const growth = 0.10;
+    const kb = (baseKB + this.damage * growth) * hb.power / this.c.weight;
+    this.vx = hb.facing * kb * (1 - hb.angle * 0.5);
+    this.vy = -kb * (0.35 + hb.angle * 0.6) - 2;
+    this.damage += Math.floor(7 * hb.power * (1 + (hb.charge || 0) * 0.4));
+    this.hitstun = Math.min(50, Math.floor(kb * 2.2 + 8));
+    // Hitstop: heavier on bigger hits
+    const stop = Math.min(18, 6 + Math.floor(hb.power * 4 + (hb.charge || 0) * 8));
+    this.hitstop = stop;
+    if (attacker) attacker.hitstop = stop;
+    this.spawnHitSpark(this.x, this.y - this.h/3);
+    this.lastHitBy = attacker ? attacker.label : null;
+    shake = Math.min(18, 5 + kb);
+  }
+
+  isKO() {
+    return this.y > STAGE.bounds.bottom || this.x < STAGE.bounds.left ||
+           this.x > STAGE.bounds.right || this.y < STAGE.bounds.top;
+  }
+  respawn() {
+    this.x = W / 2; this.y = 80;
+    this.vx = 0; this.vy = 0;
+    this.damage = 0; this.hitstun = 0;
+    this.attackTimer = 0; this.attackCooldown = 0;
+    this.charging = false; this.chargeTime = 0;
+    this.shielding = false; this.shieldHP = 100; this.shieldBroken = 0;
+    this.spawnInvuln = 90; this.upBUsed = false;
+    this.hitstop = 0;
+  }
+
+  draw(seed) {
+    // particles back
+    this.particles.forEach(p => {
+      ctx.save();
+      ctx.globalAlpha = Math.max(0, p.life / 18);
+      if (p.kind === 'spark') {
+        wobbleCircle(ctx, p.x, p.y, 2.4, { wobble: 0.3, seed: seed + p.life * 3, segments: 8, fill: p.color, stroke: false });
+      } else {
+        ctx.fillStyle = p.color; ctx.fillRect(p.x, p.y, 3, 3);
+      }
+      ctx.restore();
+    });
+
+    const flicker = this.spawnInvuln > 0 && Math.floor(this.spawnInvuln / 4) % 2 === 0;
+    if (flicker) return;
+
+    const swing = Math.sin(this.walkT) * (this.onGround ? 1 : 0.3);
+    const bob = this.onGround ? Math.abs(Math.sin(this.walkT)) * 2 : 0;
+    const feetY = this.y + this.h/2 - bob;
+
+    // hitstop shake offset
+    const hsx = this.hitstop > 0 ? (Math.random() - 0.5) * 2 : 0;
+
+    ctx.save();
+    // shadow
+    ctx.fillStyle = 'rgba(40,25,10,0.18)';
+    ctx.beginPath(); ctx.ellipse(this.x, feetY + 6, 16 - bob*0.3, 4 - bob*0.2, 0, 0, TAU); ctx.fill();
+
+    ctx.translate(this.x + hsx, feetY);
+    if (this.facing === -1) ctx.scale(-1, 1);
+
+    // legs
+    ctx.strokeStyle = this.c.ink;
+    ctx.lineWidth = 2.6; ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+    if (!this.onGround) {
+      wobbleLine(ctx, -2, -10, -4, -2, { wobble: 0.5, seed: seed + 11, segments: 4 });
+      wobbleLine(ctx,  6, -10,  9, -2, { wobble: 0.5, seed: seed + 12, segments: 4 });
+      wobbleCircle(ctx, -5, -1, 2.3, { wobble: 0.5, seed: seed + 13, segments: 10, fill: this.c.ink });
+      wobbleCircle(ctx, 10, -1, 2.5, { wobble: 0.5, seed: seed + 14, segments: 10, fill: this.c.ink });
+    } else {
+      const xB = -2 - swing * 4, xF = 4 + swing * 4;
+      wobbleLine(ctx, -2, -10, xB, -2, { wobble: 0.5, seed: seed + 11, segments: 4 });
+      wobbleLine(ctx,  4, -10, xF, -2, { wobble: 0.5, seed: seed + 12, segments: 4 });
+      wobbleCircle(ctx, xB - 1, -1, 2.3, { wobble: 0.5, seed: seed + 13, segments: 10, fill: this.c.ink });
+      wobbleCircle(ctx, xF + 1, -1, 2.5, { wobble: 0.5, seed: seed + 14, segments: 10, fill: this.c.ink });
+    }
+
+    // back arm
+    const armSwing = swing * 4;
+    wobbleLine(ctx, 0, -22, -3 - armSwing, -14 + swing * 2, { wobble: 0.5, seed: seed + 25, segments: 4 });
+    wobbleCircle(ctx, -3 - armSwing, -14 + swing * 2, 2.1, { wobble: 0.4, seed: seed + 26, segments: 8, fill: CREAM_FILL });
+
+    // body
+    wobbleShape(ctx, BODY, { wobble: 1.3, seed: seed + 1, segments: 5, fill: this.c.fill });
+    ctx.strokeStyle = this.c.ink; ctx.lineWidth = 2.6;
+    wobbleShape(ctx, BODY, { wobble: 1.3, seed: seed + 1, segments: 5, fill: null });
+
+    // front arm / attack
+    if (this.attacking) {
+      const phase = this.attackTimer <= this.c.attackWindup ? 'wind' : 'swing';
+      const reach = phase === 'wind'
+        ? -4 + (this.attackTimer / this.c.attackWindup) * 8
+        : 18 + ((this.attackTimer - this.c.attackWindup) / Math.max(1, this.c.attackDuration)) * 8;
+      const isSmash = this.attackKind === 'smash';
+      const isSpecial = this.attackKind === 'special';
+      wobbleLine(ctx, 8, -22, 12 + reach, -22, { wobble: 0.6, seed: seed + 21, segments: 5 });
+      wobbleCircle(ctx, 12 + reach, -22, isSmash ? 3.4 : 2.6, { wobble: 0.5, seed: seed + 23, segments: 10, fill: CREAM_FILL });
+
+      if (phase === 'swing') {
+        const sx = 14 + reach, sy = -22;
+        // slash arcs
+        ctx.strokeStyle = this.c.ink;
+        ctx.lineWidth = isSmash ? 4 : 3;
+        for (let i = 0; i < (isSmash ? 4 : 3); i++) {
+          wobbleLine(ctx, sx + 4 + i*6, sy - 18 + i*4, sx + 14 + i*6, sy + 18 - i*4,
+            { wobble: 1.4, seed: seed + 100 + i * 7, segments: 5, taper: true });
+        }
+        // POW text
+        ctx.save();
+        ctx.fillStyle = this.c.ink;
+        ctx.font = `bold ${isSmash ? 36 : 26}px "Caveat"`;
+        ctx.textAlign = 'left';
+        ctx.translate(sx + 8, sy - 14);
+        ctx.rotate(-0.18);
+        ctx.fillText(isSpecial ? 'ZAP!' : isSmash ? 'SMASH!' : 'POW!', 0, 0);
+        ctx.restore();
+      }
+    } else {
+      const ax = 11 - armSwing, ay = -14 - swing * 2;
+      wobbleLine(ctx, 8, -22, ax, ay, { wobble: 0.6, seed: seed + 21, segments: 5 });
+      wobbleCircle(ctx, ax, ay, 2.6, { wobble: 0.5, seed: seed + 23, segments: 10, fill: CREAM_FILL });
+    }
+
+    // face
+    const eyeX = 5, eyeY = -32;
+    if (this.shieldBroken > 0) {
+      // dazed
+      ctx.strokeStyle = PAPER.inkDeep; ctx.lineWidth = 1.6;
+      wobblePath(ctx, [[eyeX - 3, eyeY - 1], [eyeX, eyeY + 1], [eyeX + 3, eyeY - 1]], { wobble: 0.5, seed: seed + 41, segments: 3 });
+    } else if (this.blink > 0.1) {
+      ctx.strokeStyle = PAPER.inkDeep; ctx.lineWidth = 2.2;
+      wobbleLine(ctx, eyeX - 2.5, eyeY, eyeX + 2.5, eyeY, { wobble: 0.3, seed: seed + 41, segments: 4, taper: false });
+    } else if (this.hitstun > 25) {
+      ctx.strokeStyle = PAPER.inkDeep; ctx.lineWidth = 2;
+      wobbleLine(ctx, eyeX - 2.5, eyeY - 2, eyeX + 2.5, eyeY + 2, { wobble: 0.3, seed: seed + 41, segments: 3, taper: false });
+      wobbleLine(ctx, eyeX - 2.5, eyeY + 2, eyeX + 2.5, eyeY - 2, { wobble: 0.3, seed: seed + 42, segments: 3, taper: false });
+    } else if (this.charging) {
+      // angry eyes
+      ctx.strokeStyle = PAPER.inkDeep; ctx.lineWidth = 2;
+      wobbleLine(ctx, eyeX - 3, eyeY - 2, eyeX + 3, eyeY + 1, { wobble: 0.3, seed: seed + 41, segments: 3, taper: false });
+      wobbleCircle(ctx, eyeX, eyeY + 1, 1.6, { wobble: 0.3, seed: seed + 42, segments: 8, fill: PAPER.inkDeep });
+    } else {
+      wobbleCircle(ctx, eyeX, eyeY, 2.0, { wobble: 0.3, seed: seed + 41, segments: 10, fill: PAPER.inkDeep });
+      ctx.fillStyle = CREAM_FILL;
+      ctx.beginPath(); ctx.arc(eyeX + 0.6, eyeY - 0.6, 0.55, 0, TAU); ctx.fill();
+    }
+    // mouth
+    ctx.strokeStyle = PAPER.inkDeep; ctx.lineWidth = 1.6;
+    if (this.attacking || this.charging) {
+      wobblePath(ctx, [[8, -25], [11, -22.5], [13, -25]], { wobble: 0.3, seed: seed + 51, segments: 3 });
+    } else if (this.hitstun > 0) {
+      wobblePath(ctx, [[8, -23], [11, -25], [13, -23]], { wobble: 0.3, seed: seed + 51, segments: 3 });
+    } else {
+      wobblePath(ctx, [[8, -24.5], [11, -23], [13, -24.5]], { wobble: 0.3, seed: seed + 51, segments: 3 });
+    }
+    // nose
+    ctx.strokeStyle = this.c.ink; ctx.lineWidth = 1.8;
+    wobblePath(ctx, [[13, -30], [16, -28], [13, -26]], { wobble: 0.3, seed: seed + 71, segments: 3 });
+    // cheek
+    ctx.fillStyle = 'rgba(200,90,80,0.25)';
+    ctx.beginPath(); ctx.ellipse(2, -27, 2.4, 1.4, 0, 0, TAU); ctx.fill();
+
+    // accessory
+    if (this.c.accessory === 'glasses') {
+      ctx.strokeStyle = PAPER.inkDeep; ctx.lineWidth = 1.8;
+      wobbleCircle(ctx, eyeX - 1.5, eyeY, 3.8, { wobble: 0.3, seed: seed + 81, segments: 12, fill: null });
+    } else if (this.c.accessory === 'beret') {
+      wobbleShape(ctx, [[-7, -42], [-2, -48], [8, -47], [10, -42], [0, -41]],
+        { wobble: 0.6, seed: seed + 82, segments: 4, fill: this.c.ink });
+      ctx.strokeStyle = this.c.ink; ctx.lineWidth = 2;
+      wobbleLine(ctx, 8, -47, 11, -50, { wobble: 0.3, seed: seed + 83, segments: 3, taper: false });
+    }
+
+    // hitstun overlay
+    if (this.hitstun > 0) {
+      ctx.fillStyle = `rgba(181,65,59,${this.hitstun/45 * 0.35})`;
+      ctx.beginPath();
+      for (const [x, y] of BODY) ctx.lineTo(x, y);
+      ctx.closePath(); ctx.fill();
+    }
+
+    // CHARGE GLOW
+    if (this.charging) {
+      const c = this.chargeTime / this.maxCharge;
+      ctx.save();
+      ctx.globalAlpha = 0.3 + c * 0.4;
+      wobbleCircle(ctx, 0, -22, 22 + c * 14, { wobble: 2.5, seed: seed + 7700, segments: 18, fill: `rgba(255,200,80,${0.25 + c*0.3})`, stroke: false });
+      ctx.globalAlpha = 0.6 + c * 0.4;
+      // sparks
+      for (let i = 0; i < 4; i++) {
+        const ang = (seed * 0.1 + i) * 1.7;
+        const rr = 22 + c * 14 + 4;
+        wobbleCircle(ctx, Math.cos(ang) * rr, -22 + Math.sin(ang) * rr, 2,
+          { wobble: 0.4, seed: seed + 7800 + i, segments: 6, fill: '#B58400', stroke: false });
+      }
+      ctx.restore();
+    }
+
+    ctx.restore();
+
+    // ── overlays drawn in screen space ──
+    // SHIELD bubble
+    if (this.shielding) {
+      ctx.save();
+      const cx = this.x + hsx, cy = this.y - 6;
+      const r = 28 + this.shieldHP * 0.18;
+      wobbleCircle(ctx, cx, cy, r, {
+        wobble: 2, seed: seed + 5555, segments: 28,
+        fill: `rgba(180,200,255,${0.18 + this.shieldHP/700})`, stroke: false
+      });
+      ctx.strokeStyle = this.c.ink; ctx.lineWidth = 1.6; ctx.globalAlpha = 0.7;
+      wobbleCircle(ctx, cx, cy, r, { wobble: 2, seed: seed + 5556, segments: 28, fill: null });
+      // shine
+      ctx.strokeStyle = '#fff'; ctx.lineWidth = 2;
+      wobbleLine(ctx, cx - r * 0.5, cy - r * 0.45, cx - r * 0.15, cy - r * 0.65,
+        { wobble: 0.8, seed: seed + 5557, segments: 3, taper: false });
+      ctx.restore();
+    }
+
+    // damage %
+    const d = this.damage;
+    const col = d < 50 ? '#1F2A4A' : d < 100 ? '#B58400' : d < 150 ? '#B5413B' : '#7A0E0A';
+    ctx.save();
+    ctx.fillStyle = col;
+    ctx.font = `bold ${28 + Math.min(8, d/20)}px "Caveat"`;
+    ctx.textAlign = 'center';
+    const labelY = this.y - this.h/2 - 14;
+    ctx.translate(this.x, labelY);
+    ctx.rotate((rand(seed * 3.1 + this.label * 17) - 0.5) * 0.12);
+    ctx.fillText(`${d}%`, 0, 0);
+    ctx.restore();
+  }
+}
+
+// ─── Bug item ──────────────────────────────────────────────────────
+class Bug {
+  constructor() {
+    this.x = W * 0.5; this.y = 60;
+    this.t = 0;
+  }
+  update(dt) { this.t += dt; }
+  draw(seed) {
+    const x = this.x + Math.sin(this.t * 1.8) * 30;
+    const y = this.y + Math.cos(this.t * 1.3) * 15;
+    ctx.save(); ctx.translate(x, y);
+    const pts = [];
+    const rx = 14, ry = 9, segs = 18;
+    for (let i = 0; i <= segs; i++) {
+      const ang = (i / segs) * TAU;
+      const wob = (rand(seed + i * 13.3 + 901) - 0.5) * 1.6;
+      pts.push([Math.cos(ang) * (rx + wob), Math.sin(ang) * (ry + wob)]);
+    }
+    ctx.fillStyle = BUG_FILL; fillSmooth(ctx, pts);
+    ctx.strokeStyle = BUG_INK; ctx.lineWidth = 2; strokeSmooth(ctx, pts, true);
+    wobbleCircle(ctx, -14, 0, 6, { wobble: 0.8, seed: seed + 902, segments: 12, fill: BUG_FILL });
+    ctx.strokeStyle = BUG_INK; ctx.lineWidth = 2;
+    wobbleCircle(ctx, -14, 0, 6, { wobble: 0.8, seed: seed + 902, segments: 12, fill: null });
+    wobbleLine(ctx, -16, -4, -22, -12, { wobble: 0.4, seed: seed + 903, segments: 3 });
+    wobbleLine(ctx, -16,  4, -22, -8,  { wobble: 0.4, seed: seed + 904, segments: 3 });
+    wobbleCircle(ctx, -22, -12, 1.5, { wobble: 0.3, seed: seed + 905, segments: 8, fill: BUG_INK });
+    wobbleCircle(ctx, -22, -8, 1.5, { wobble: 0.3, seed: seed + 906, segments: 8, fill: BUG_INK });
+    for (let i = -1; i <= 1; i++) {
+      wobbleLine(ctx, i * 6, 8, i * 6 - 3, 14, { wobble: 0.4, seed: seed + 920 + i*5, segments: 3 });
+      wobbleLine(ctx, i * 6, -8, i * 6 - 3, -14, { wobble: 0.4, seed: seed + 930 + i*5, segments: 3 });
+    }
+    ctx.save(); ctx.globalAlpha = 0.35;
+    wobbleShape(ctx, [[-2, -4], [4, -16], [14, -14], [10, -4]], { wobble: 0.6, seed: seed + 940, segments: 4, fill: '#fff' });
+    ctx.restore();
+    wobbleCircle(ctx, -16, -1, 1.5, { wobble: 0.2, seed: seed + 950, segments: 6, fill: BUG_INK });
+    ctx.restore();
+  }
+}
+
+// ─── HUD ───────────────────────────────────────────────────────────
+function drawHUD(seed) {
+  const drawCard = (p, x, y, align, color) => {
+    ctx.save();
+    ctx.translate(x, y);
+    ctx.rotate(align === 'left' ? -0.025 : 0.025);
+    const cw = 210, ch = 90;
+    const ox = align === 'left' ? 0 : -cw;
+    const pts = [
+      [ox + 4, 4], [ox + cw - 4, 6], [ox + cw - 2, ch - 4],
+      [ox + cw - 6, ch], [ox + 6, ch - 2], [ox + 2, ch - 6]
+    ];
+    wobbleShape(ctx, pts, { wobble: 1.2, seed: seed + 700 + p.label, segments: 4, fill: 'rgba(255,250,230,0.85)' });
+    ctx.strokeStyle = color; ctx.lineWidth = 2.2;
+    wobbleShape(ctx, pts, { wobble: 1.2, seed: seed + 700 + p.label, segments: 4, fill: null });
+
+    ctx.fillStyle = color;
+    ctx.font = 'bold 24px "Caveat"';
+    ctx.textAlign = align;
+    ctx.fillText(`P${p.label} · ${p.c.name}`, align === 'left' ? ox + 14 : ox + cw - 14, 28);
+
+    // stocks
+    const sx0 = align === 'left' ? ox + 14 : ox + cw - 14 - 60;
+    for (let i = 0; i < 3; i++) {
+      if (i < p.stocks) {
+        wobbleCircle(ctx, sx0 + i * 22 + 8, 48, 6.5, { wobble: 0.5, seed: seed + 800 + p.label * 10 + i, segments: 10, fill: color });
+      } else {
+        ctx.strokeStyle = color; ctx.lineWidth = 1.5;
+        wobbleCircle(ctx, sx0 + i * 22 + 8, 48, 6.5, { wobble: 0.5, seed: seed + 800 + p.label * 10 + i, segments: 10, fill: null });
+      }
+    }
+    // damage bar
+    const bx = align === 'left' ? ox + 88 : ox + 14;
+    const bw = 108;
+    ctx.strokeStyle = color; ctx.lineWidth = 1.5;
+    wobbleShape(ctx, [[bx, 42], [bx + bw, 42], [bx + bw, 54], [bx, 54]],
+      { wobble: 0.4, seed: seed + 900 + p.label, segments: 3, fill: 'rgba(255,255,255,0.5)' });
+    const dmgPct = Math.min(1, p.damage / 200);
+    ctx.fillStyle = p.damage < 60 ? '#3a8a3a' : p.damage < 120 ? '#B58400' : '#B5413B';
+    ctx.fillRect(bx + 2, 44, (bw - 4) * dmgPct, 8);
+
+    ctx.fillStyle = color; ctx.font = 'bold 22px "Caveat"'; ctx.textAlign = align;
+    ctx.fillText(`${p.damage}%`, align === 'left' ? ox + 14 : ox + cw - 14, 76);
+
+    // shield bar (small, below)
+    const sbx = align === 'left' ? ox + 88 : ox + 14;
+    const sbw = 108;
+    ctx.fillStyle = 'rgba(31,42,74,0.15)';
+    ctx.fillRect(sbx, 64, sbw, 5);
+    ctx.fillStyle = p.shieldBroken > 0 ? '#B5413B' : '#5a8cd6';
+    ctx.fillRect(sbx, 64, sbw * (p.shieldHP / 100), 5);
+
+    ctx.restore();
+  };
+  drawCard(p1, 30, H - 130, 'left', p1.c.ink);
+  drawCard(p2, W - 30, H - 130, 'right', p2.c.ink);
+}
+
+// ─── KO animation (smash zoom) ─────────────────────────────────────
+let koAnim = null;  // { player, exitX, exitY, t, duration, ended }
+function startKO(p) {
+  const exitX = Math.max(20, Math.min(W - 20, p.x));
+  const exitY = Math.max(20, Math.min(H - 20, p.y));
+  koAnim = {
+    player: p, exitX, exitY,
+    dirX: Math.sign(p.vx) || (Math.random() < 0.5 ? -1 : 1),
+    dirY: Math.sign(p.vy) || -1,
+    t: 0, duration: 0.9
+  };
+  gameState = 'koZoom';
+  shake = 22;
+}
+function drawKO(dt, seed) {
+  koAnim.t += dt;
+  const t = Math.min(1, koAnim.t / koAnim.duration);
+
+  // dark vignette overlay
+  ctx.save();
+  ctx.fillStyle = `rgba(28,24,20,${0.35 * t})`;
+  ctx.fillRect(0, 0, W, H);
+  ctx.restore();
+
+  // a star bursting at the exit point
+  const x = koAnim.exitX;
+  const y = koAnim.exitY;
+  const r = 12 + t * 90;
+  ctx.save();
+  ctx.translate(x, y);
+  ctx.rotate(t * 1.5);
+  // burst rays
+  ctx.strokeStyle = koAnim.player.c.ink;
+  ctx.lineWidth = 3;
+  for (let i = 0; i < 8; i++) {
+    const a = i * TAU / 8;
+    wobbleLine(ctx, Math.cos(a) * r * 0.3, Math.sin(a) * r * 0.3,
+      Math.cos(a) * r, Math.sin(a) * r,
+      { wobble: 1.4, seed: seed + 6000 + i, segments: 4, taper: true });
+  }
+  // star body
+  wobbleCircle(ctx, 0, 0, r * 0.5, { wobble: 2, seed: seed + 6100, segments: 18, fill: koAnim.player.c.fill });
+  ctx.strokeStyle = koAnim.player.c.ink; ctx.lineWidth = 2.4;
+  wobbleCircle(ctx, 0, 0, r * 0.5, { wobble: 2, seed: seed + 6100, segments: 18, fill: null });
+  ctx.restore();
+
+  // SMASH! text
+  ctx.save();
+  ctx.translate(x + koAnim.dirX * 30, y - 40);
+  ctx.rotate(-0.12 * koAnim.dirX);
+  ctx.fillStyle = koAnim.player.c.ink;
+  ctx.font = `bold ${50 + t * 30}px "Caveat"`;
+  ctx.textAlign = 'center';
+  ctx.fillText('SMASH!', 0, 0);
+  // outline
+  ctx.strokeStyle = '#FAF1D5'; ctx.lineWidth = 4;
+  ctx.strokeText('SMASH!', 0, 0);
+  ctx.fillText('SMASH!', 0, 0);
+  ctx.restore();
+
+  if (t >= 1) {
+    const p = koAnim.player;
+    p.stocks--;
+    if (p.stocks > 0) { p.respawn(); gameState = 'playing'; }
+    else { gameState = 'gameover'; winner = p === p1 ? p2 : p1; }
+    koAnim = null;
+  }
+}
+
+// ─── Game state ────────────────────────────────────────────────────
+let p1, p2, bug, gameState, winner, shake = 0, countdownTimer = 0;
+let lastT = 0, seed = 0;
+
+function resetMatch() {
+  p1 = new Fighter(CHARS.backend, W / 2 - 140, H * 0.45, P1_CTRL, 1);
+  p2 = new Fighter(CHARS.frontend, W / 2 + 140, H * 0.45, P2_CTRL, 2);
+  p2.facing = -1;
+  bug = new Bug();
+  gameState = 'countdown';
+  winner = null; shake = 0; countdownTimer = 180;
+}
+
+function rectIntersect(a, b) {
+  return a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y;
+}
+
+function frame(now) {
+  const dt = lastT === 0 ? 1/60 : Math.min(0.05, (now - lastT) / 1000);
+  lastT = now;
+  seed = (now * 0.01) | 0;
+
+  if (gameState === 'countdown') {
+    p1.update({}, dt); p2.update({}, dt);
+    countdownTimer--;
+    if (countdownTimer <= 0) gameState = 'playing';
+  } else if (gameState === 'playing') {
+    const i1 = readInput(P1_CTRL), i2 = readInput(P2_CTRL);
+    p1.update(i1, dt); p2.update(i2, dt);
+    if (Math.abs(p1.vx) < 0.5 && p1.onGround && !p1.attacking && !p1.charging && !p1.shielding) p1.facing = p2.x > p1.x ? 1 : -1;
+    if (Math.abs(p2.vx) < 0.5 && p2.onGround && !p2.attacking && !p2.charging && !p2.shielding) p2.facing = p1.x > p2.x ? 1 : -1;
+
+    const hb1 = p1.getHitbox();
+    const p2Box = { x: p2.x - p2.w/2, y: p2.y - p2.h/2, w: p2.w, h: p2.h };
+    if (hb1 && !p1.hitThisSwing && p2.spawnInvuln <= 0 && p2.hitstop <= 0 && p2.hitstun <= 0 && rectIntersect(hb1, p2Box)) {
+      p2.takeHit(hb1, p1); p1.hitThisSwing = true;
+    }
+    const hb2 = p2.getHitbox();
+    const p1Box = { x: p1.x - p1.w/2, y: p1.y - p1.h/2, w: p1.w, h: p1.h };
+    if (hb2 && !p2.hitThisSwing && p1.spawnInvuln <= 0 && p1.hitstop <= 0 && p1.hitstun <= 0 && rectIntersect(hb2, p1Box)) {
+      p1.takeHit(hb2, p2); p2.hitThisSwing = true;
+    }
+
+    if (p1.isKO()) startKO(p1);
+    else if (p2.isKO()) startKO(p2);
+
+    bug.update(dt);
+  } else if (gameState === 'koZoom') {
+    bug.update(dt);
+  } else {
+    p1.update({}, dt); p2.update({}, dt);
+    bug.update(dt);
+    if (pressed['KeyR']) resetMatch();
+  }
+
+  // render
+  ctx.save();
+  if (shake > 0) {
+    ctx.translate((Math.random()-0.5) * shake, (Math.random()-0.5) * shake);
+    shake *= 0.85;
+    if (shake < 0.5) shake = 0;
+  }
+
+  renderPaper(ctx, W, H, dpr);
+
+  drawPlatform(STAGE.main, 1, '— producción —');
+  STAGE.platforms.forEach((p, i) => drawPlatform(p, 100 + i * 11, ['staging','staging','dev'][i]));
+
+  bug.draw(seed);
+  p1.draw(seed);
+  p2.draw(seed + 999);
+  drawHUD(seed);
+
+  if (gameState === 'countdown') {
+    const n = Math.ceil(countdownTimer / 60);
+    const labels = { 3: 'listos…', 2: 'preparados…', 1: 'YA!' };
+    const label = labels[n] || 'YA!';
+    ctx.save();
+    ctx.translate(W/2, H/2); ctx.rotate(-0.04);
+    ctx.fillStyle = PAPER.ink; ctx.font = 'bold 88px "Caveat"'; ctx.textAlign = 'center';
+    ctx.fillText(label, 0, 0); ctx.restore();
+  }
+
+  if (gameState === 'koZoom') drawKO(dt, seed);
+
+  if (gameState === 'gameover') {
+    ctx.save();
+    ctx.fillStyle = 'rgba(28, 24, 20, 0.55)'; ctx.fillRect(0, 0, W, H);
+    const loser = winner === p1 ? p2 : p1;
+    ctx.translate(W/2, H/2 - 60); ctx.rotate(-0.03);
+    const cw = 460, ch = 240;
+    wobbleShape(ctx, [[-cw/2, -ch/2], [cw/2, -ch/2 + 8], [cw/2 + 4, ch/2], [-cw/2 + 6, ch/2 - 4]],
+      { wobble: 2, seed: seed + 5000, segments: 5, fill: '#FAF1D5' });
+    ctx.strokeStyle = PAPER.ink; ctx.lineWidth = 3;
+    wobbleShape(ctx, [[-cw/2, -ch/2], [cw/2, -ch/2 + 8], [cw/2 + 4, ch/2], [-cw/2 + 6, ch/2 - 4]],
+      { wobble: 2, seed: seed + 5000, segments: 5, fill: null });
+    ctx.fillStyle = winner.c.ink; ctx.font = 'bold 56px "Caveat"'; ctx.textAlign = 'center';
+    ctx.fillText(`gana ${winner.c.name}!`, 0, -50);
+    ctx.fillStyle = PAPER.ink; ctx.font = '28px "Patrick Hand"';
+    ctx.fillText('el bug es para…', 0, 0);
+    ctx.fillStyle = loser.c.ink; ctx.font = 'bold 48px "Caveat"';
+    ctx.fillText(`P${loser.label} · ${loser.c.name}`, 0, 50);
+    ctx.fillStyle = '#6a5a3a'; ctx.font = '20px "Patrick Hand"';
+    ctx.fillText('[ R ] revancha', 0, 100);
+    ctx.restore();
+  }
+
+  ctx.restore();
+
+  for (const k in pressed) delete pressed[k];
+  for (const k in released) delete released[k];
+  requestAnimationFrame(frame);
+}
+
+resize();
+resetMatch();
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
